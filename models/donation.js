@@ -37,6 +37,11 @@ const donationSchema = mongoose.Schema(
       required: true,
       min: [1, "Quantity must be at least 1"],
     },
+    totalQuantity: { type: Number, default: 0 },
+    leftQuantity: { type: Number, default: 0 },
+    scheduledQuantity: { type: Number, default: 0 },
+    pickupAddress: { type: String, default: "" },
+    deliveryAddress: { type: String, default: "" },
     description: { type: String },
     scheduleDate: {
       type: String,

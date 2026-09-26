@@ -1,10 +1,11 @@
 const donationModel = require("../models/donation");
-//const sendNotification = require("../config/firebase");
+const sendNotification = require("../config/firebase");
 const admin = require("../config/firebase");
 const fs = require("fs");
 const path = require("path");
 const userModel = require("../models/user");
 const materialModel = require("../models/material");
+const chatModel = require("../models/chat");
 const { nanoid } = require("nanoid");
 //const { json } = require("stream/consumers");
 //const user = require("../models/user");
@@ -32,7 +33,7 @@ exports.addDonation = async (req, res) => {
       });
     }
 
-    const { materialType, quantity, description, donationStatus } = req.body;
+    const { materialType, quantity, description, donationStatus, pickupAddress, address } = req.body;
     console.log(req.body)
 
     if (!materialType || !quantity) {
@@ -78,20 +79,25 @@ exports.addDonation = async (req, res) => {
     }
 
     const images = imageFiles.map((file) => ({
-  id: nanoid(),
-  public_id: file.filename,   // Cloudinary public_id
-  url: file.path,             // Cloudinary secure URL
-}));
+      id: nanoid(),
+      public_id: file.filename,   // Cloudinary public_id
+      url: file.path,             // Cloudinary secure URL
+    }));
 
+    const numQty = Number(quantity) || 1;
+    const finalPickupAddress = (pickupAddress || address || user.address || "").trim();
 
     const newDonation = await donationModel.create({
       userId,
       materialType,
       materialId: findMaterial.materialId,
-      quantity,
+      quantity: numQty,
+      totalQuantity: numQty,
+      leftQuantity: numQty,
+      pickupAddress: finalPickupAddress,
       description,
       donationStatus,
-      totalPrice: findMaterial.value * quantity,
+      totalPrice: findMaterial.value * numQty,
       images,
     });
 
@@ -143,26 +149,28 @@ exports.getDonation = async (req, res) => {
       donations = await donationModel
         .find({ userId: userId })
         .populate("materialType")
-        .populate({ path: "userId", select: "fullName" })
-        .populate({ path: "scheduleById", select: "fullName" })
-        .populate({ path: "canceledById", select: "fullName" })
+        .populate({ path: "userId", select: "fullName email phone profileImage userType address" })
+        .populate({ path: "scheduleById", select: "fullName email phone profileImage userType address" })
+        .populate({ path: "canceledById", select: "fullName email phone profileImage userType address" })
         .lean();
     } else {
       donations = await donationModel
         .find()
         .populate("materialType")
-        .populate({ path: "userId", select: "fullName" })
-        .populate({ path: "scheduleById", select: "fullName" })
-        .populate({ path: "canceledById", select: "fullName" })
+        .populate({ path: "userId", select: "fullName email phone profileImage userType address" })
+        .populate({ path: "scheduleById", select: "fullName email phone profileImage userType address" })
+        .populate({ path: "canceledById", select: "fullName email phone profileImage userType address" })
         .lean();
     }
 
     const formattedDonations = donations.map((donation) => ({
       ...donation,
+      totalQuantity: donation.totalQuantity || donation.quantity,
+      leftQuantity: typeof donation.leftQuantity === "number" ? donation.leftQuantity : donation.quantity,
       images: (donation.images || []).map((img) => ({
-        id: img.id,
+        id: img.id || img._id,
         url: img.url,          // Cloudinary URL
-        public_id: img.public_id, // optional
+        public_id: img.public_id,
       })),
     }));
 
@@ -211,6 +219,26 @@ exports.scheduleDonation = async (req, res) => {
           .json({ success: false, message: "Delivery Type is required." });
       }
 
+      const currentLeft =
+        typeof findDonation.leftQuantity === "number" && findDonation.leftQuantity > 0
+          ? findDonation.leftQuantity
+          : findDonation.quantity;
+
+      const requestedQty = Math.max(
+        1,
+        Math.min(
+          Number(scheduledQuantity) || Number(quantity) || currentLeft,
+          currentLeft
+        )
+      );
+      const newLeft = Math.max(0, currentLeft - requestedQty);
+      const finalDeliveryAddress = (
+        deliveryAddress ||
+        address ||
+        checkUser.address ||
+        ""
+      ).trim();
+
       const scheduleById = checkUser.id;
 
       const donation = await donationModel
@@ -222,12 +250,16 @@ exports.scheduleDonation = async (req, res) => {
             scheduleTime,
             scheduleById,
             deliveryType,
+            deliveryAddress: finalDeliveryAddress,
+            scheduledQuantity: requestedQty,
+            leftQuantity: newLeft,
+            totalQuantity: findDonation.totalQuantity || findDonation.quantity,
           },
           { new: true }
         )
         .populate("materialType")
-        .populate({ path: "userId", select: "fullName" })
-        .populate({ path: "scheduleById", select: "fullName" })
+        .populate({ path: "userId", select: "fullName email phone profileImage userType address" })
+        .populate({ path: "scheduleById", select: "fullName email phone profileImage userType address" })
         .lean(); // this is the donor
 
       // Add to receiver's donation list
@@ -235,19 +267,66 @@ exports.scheduleDonation = async (req, res) => {
         $addToSet: { donations: donationId },
       });
 
+      // 💬 Auto-send message between receiver and donor
+      try {
+        const donorId = (donation.userId?._id || donation.userId || "").toString();
+        const receiverId = userId.toString();
+        const dateStr = scheduleDate || "the scheduled date";
+        const timeStr = scheduleTime ? ` at ${scheduleTime}` : "";
+
+        let msgSenderId, msgReceiverId, autoMessageText;
+
+        if (deliveryType === "pickup") {
+          // Message from Receiver -> Donor
+          msgSenderId = receiverId;
+          msgReceiverId = donorId;
+          const pickupLoc = findDonation.pickupAddress
+            ? ` Pickup location: "${findDonation.pickupAddress}".`
+            : "";
+          autoMessageText = `Hi! A pickup has been scheduled for ${dateStr}${timeStr}.${pickupLoc} Please confirm your location/address.`;
+        } else {
+          // Message from Donor -> Receiver
+          msgSenderId = donorId;
+          msgReceiverId = receiverId;
+          const deliveryLoc = finalDeliveryAddress
+            ? ` Delivery location: "${finalDeliveryAddress}".`
+            : "";
+          autoMessageText = `Hi! Delivery is scheduled for ${dateStr}${timeStr}.${deliveryLoc} Please confirm your location/address.`;
+        }
+
+        if (msgSenderId && msgReceiverId) {
+          const autoChat = await chatModel.create({
+            senderId: msgSenderId,
+            receiverId: msgReceiverId,
+            message: autoMessageText,
+          });
+
+          const populatedChat = await chatModel
+            .findById(autoChat._id)
+            .populate("senderId", "name profileImage userType")
+            .populate("receiverId", "name profileImage userType");
+
+          if (req.io) {
+            req.io.to(msgSenderId).emit("receive-message", populatedChat);
+            req.io.to(msgReceiverId).emit("receive-message", populatedChat);
+          }
+        }
+      } catch (chatError) {
+        console.error("Auto chat message error on scheduling:", chatError);
+      }
+
       // ✅ Send FCM notification to donor
       const donor = donation.userId;
-      const deviceTokens = (donor.deviceId || []).filter(Boolean);
+      const deviceTokens = (donor?.deviceId || []).filter(Boolean);
 
       const donationData = {
-  ...donation,
-  images: (donation.images || []).map(img => ({
-    id: img.id,
-    url: img.url,         // Cloudinary URL
-    public_id: img.public_id
-  }))
-};
-
+        ...donation,
+        images: (donation.images || []).map((img) => ({
+          id: img.id || img._id,
+          url: img.url, // Cloudinary URL
+          public_id: img.public_id,
+        })),
+      };
 
       console.log(deviceTokens);
 
@@ -255,13 +334,13 @@ exports.scheduleDonation = async (req, res) => {
         const message = {
           notification: {
             title: "Donation Scheduled",
-            body: `Your donation for "${donation.materialType.name}" has been scheduled.`,
+            body: `Your donation for "${donation.materialType?.name || donation.materialType?.material || "Material"}" has been scheduled.`,
           },
           data: {
             type: "donation_scheduled",
             donationId: donation._id.toString(),
           },
-          tokens: deviceTokens.filter(Boolean), // remove nulls if any
+          tokens: deviceTokens.filter(Boolean),
         };
 
         try {
@@ -281,11 +360,11 @@ exports.scheduleDonation = async (req, res) => {
         }
       }
 
-      res.status(200).json({
-  success: true,
-  message: "Donation scheduled successfully.",
-  data: donationData,
-});
+      return res.status(200).json({
+        success: true,
+        message: "Donation scheduled successfully.",
+        data: donationData,
+      });
 
     } else {
       return res.status(403).json({
@@ -480,6 +559,9 @@ exports.editDonation = async (req, res) => {
       if (donationStatus === "cancelled") {
         changes.canceledById = checkUser._id;
         changes.donationStatus = "cancelled";
+        const restoredQty = findDonation.scheduledQuantity || 0;
+        changes.leftQuantity = (findDonation.leftQuantity || 0) + restoredQty;
+        changes.scheduledQuantity = 0;
       }
 
       if (delivery === true && findDonation.delivery !== true) changes.delivery = true;
@@ -487,9 +569,9 @@ exports.editDonation = async (req, res) => {
       const donation = await donationModel
         .findByIdAndUpdate(donationId, changes, { new: true })
         .populate("materialType")
-        .populate({ path: "userId", select: "fullName" })
-        .populate({ path: "scheduleById", select: "fullName" })
-        .populate({ path: "canceledById", select: "fullName" });
+        .populate({ path: "userId", select: "fullName email phone profileImage userType address" })
+        .populate({ path: "scheduleById", select: "fullName email phone profileImage userType address" })
+        .populate({ path: "canceledById", select: "fullName email phone profileImage userType address" });
 
       if (donation.donationStatus === "completed" && currentStatus !== "completed") {
         const donor = await userModel.findById(findDonation.userId);
@@ -604,15 +686,18 @@ exports.editDonation = async (req, res) => {
     if (donationStatus === "cancelled") {
       changes.canceledById = checkUser._id;
       changes.donationStatus = "cancelled";
+      const restoredQty = findDonation.scheduledQuantity || 0;
+      changes.leftQuantity = (findDonation.leftQuantity || 0) + restoredQty;
+      changes.scheduledQuantity = 0;
     }
     if (pickup === true && findDonation.pickup !== true) changes.pickup = true;
 
     const updatedDonation = await donationModel
       .findByIdAndUpdate(donationId, changes, { new: true })
       .populate("materialType")
-      .populate({ path: "userId", select: "fullName" })
-      .populate({ path: "scheduleById", select: "fullName" })
-      .populate({ path: "canceledById", select: "fullName" });
+      .populate({ path: "userId", select: "fullName email phone profileImage userType address" })
+      .populate({ path: "scheduleById", select: "fullName email phone profileImage userType address" })
+      .populate({ path: "canceledById", select: "fullName email phone profileImage userType address" });
 
     // Notifications
     if (updatedDonation.donationStatus === "completed" && currentStatus !== "completed") {
@@ -663,24 +748,28 @@ exports.trackDonation = async (req, res) => {
     const baseUrl = `${req.protocol}://${req.get("host")}`;
 
     const buildImageUrl = (images) => {
-      return images.map((img) => ({
-        _id: img.id,
-        url: `${baseUrl}/uploads/donations/${img.filename}`,
+      return (images || []).map((img) => ({
+        _id: img.id || img._id,
+        id: img.id || img._id,
+        url: img.url || (img.filename ? `${baseUrl}/uploads/donations/${img.filename}` : ""),
+        public_id: img.public_id,
       }));
     };
 
     const formatDonations = (donations) => {
-      return donations.map((donation) => ({
+      return (donations || []).map((donation) => ({
         ...donation.toObject(),
+        totalQuantity: donation.totalQuantity || donation.quantity,
+        leftQuantity: typeof donation.leftQuantity === "number" ? donation.leftQuantity : donation.quantity,
         images: buildImageUrl(donation.images || []),
       }));
     };
 
     const populateFields = [
       "materialType",
-      { path: "userId", select: "fullName userType" },
-      { path: "scheduleById", select: "fullName userType" },
-      { path: "canceledById", select: "fullName userType" },
+      { path: "userId", select: "fullName email phone profileImage userType address" },
+      { path: "scheduleById", select: "fullName email phone profileImage userType address" },
+      { path: "canceledById", select: "fullName email phone profileImage userType address" },
     ];
 
     if (checkUser.userType === "donor") {
@@ -866,20 +955,24 @@ exports.addFavorites = async (req, res) => {
       .populate({
         path: "favorites",
         populate: [
-          { path: "userId", select: "fullName userType" },
-          { path: "scheduleById", select: "fullName userType" },
-          { path: "canceledById", select: "fullName userType" },
+          { path: "userId", select: "fullName email phone profileImage userType address" },
+          { path: "scheduleById", select: "fullName email phone profileImage userType address" },
+          { path: "canceledById", select: "fullName email phone profileImage userType address" },
           { path: "materialType", select: "material unit value" },
         ],
       });
 
     const baseUrl = `${req.protocol}://${req.get("host")}`;
 
-    const formattedFavorites = updatedUser.favorites.map((donation) => ({
+    const formattedFavorites = (updatedUser.favorites || []).map((donation) => ({
       ...donation.toObject(),
-      images: donation.images.map((img) => ({
-        id: img.id,
-        url: `${baseUrl}/uploads/donations/${img.filename}`,
+      totalQuantity: donation.totalQuantity || donation.quantity,
+      leftQuantity: typeof donation.leftQuantity === "number" ? donation.leftQuantity : donation.quantity,
+      images: (donation.images || []).map((img) => ({
+        id: img.id || img._id,
+        _id: img.id || img._id,
+        url: img.url || (img.filename ? `${baseUrl}/uploads/donations/${img.filename}` : ""),
+        public_id: img.public_id,
       })),
     }));
 
@@ -906,9 +999,9 @@ exports.getAllFavorites = async (req, res) => {
       .populate({
         path: "favorites",
         populate: [
-          { path: "userId", select: "fullName userType" },
-          { path: "scheduleById", select: "fullName userType" },
-          { path: "canceledById", select: "fullName userType" },
+          { path: "userId", select: "fullName email phone profileImage userType address" },
+          { path: "scheduleById", select: "fullName email phone profileImage userType address" },
+          { path: "canceledById", select: "fullName email phone profileImage userType address" },
           { path: "materialType", select: "material unit value" },
         ],
       });
@@ -922,11 +1015,15 @@ exports.getAllFavorites = async (req, res) => {
     const baseUrl = `${req.protocol}://${req.get("host")}`;
 
     // Format image URLs for each favorite donation
-    const formattedFavorites = user.favorites.map((donation) => ({
+    const formattedFavorites = (user.favorites || []).map((donation) => ({
       ...donation.toObject(),
-      images: donation.images.map((img) => ({
-        id: img.id,
-        url: `${baseUrl}/uploads/donations/${img.filename}`,
+      totalQuantity: donation.totalQuantity || donation.quantity,
+      leftQuantity: typeof donation.leftQuantity === "number" ? donation.leftQuantity : donation.quantity,
+      images: (donation.images || []).map((img) => ({
+        id: img.id || img._id,
+        _id: img.id || img._id,
+        url: img.url || (img.filename ? `${baseUrl}/uploads/donations/${img.filename}` : ""),
+        public_id: img.public_id,
       })),
     }));
 
@@ -983,9 +1080,9 @@ exports.removeFromFavorites = async (req, res) => {
       .populate({
         path: "favorites",
         populate: [
-          { path: "userId", select: "fullName userType" },
-          { path: "scheduleById", select: "fullName userType" },
-          { path: "canceledById", select: "fullName userType" },
+          { path: "userId", select: "fullName email phone profileImage userType address" },
+          { path: "scheduleById", select: "fullName email phone profileImage userType address" },
+          { path: "canceledById", select: "fullName email phone profileImage userType address" },
           { path: "materialType", select: "material unit value" },
         ],
       })
@@ -993,11 +1090,15 @@ exports.removeFromFavorites = async (req, res) => {
 
     const baseUrl = `${req.protocol}://${req.get("host")}`;
 
-    const formattedFavorites = updatedUser.favorites.map((donation) => ({
+    const formattedFavorites = (updatedUser.favorites || []).map((donation) => ({
       ...donation.toObject(),
-      images: donation.images.map((img) => ({
-        id: img.id,
-        url: `${baseUrl}/uploads/donations/${img.filename}`,
+      totalQuantity: donation.totalQuantity || donation.quantity,
+      leftQuantity: typeof donation.leftQuantity === "number" ? donation.leftQuantity : donation.quantity,
+      images: (donation.images || []).map((img) => ({
+        id: img.id || img._id,
+        _id: img.id || img._id,
+        url: img.url || (img.filename ? `${baseUrl}/uploads/donations/${img.filename}` : ""),
+        public_id: img.public_id,
       })),
     }));
 

@@ -11,7 +11,7 @@ router.post(
   donationController.addDonation
 );
 
-router.get("/list", isLoggedIn, donationController.getDonation);
+router.get("/list",isLoggedIn, donationController.getDonation);
 
 router.put(
   "/:id",

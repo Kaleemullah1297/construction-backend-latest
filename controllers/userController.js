@@ -445,15 +445,20 @@ exports.getProfile = async (req, res) => {
         .json({ success: false, message: "User not found." });
     }
 
+    const baseUrl = `${req.protocol}://${req.get("host")}`;
+    const buildProfileImg = (img) => {
+      if (!img) return `${baseUrl}/uploads/profile/default.png`;
+      if (typeof img === "string" && img.startsWith("http")) return img;
+      return `${baseUrl}/uploads/profile/${img}`;
+    };
+
     if (user.userType === "donor") {
       return res.status(200).json({
         success: true,
         message: "Donor profile fetched successfully.",
         data: {
           ...user.toObject(),
-          profileImage: user.profileImage
-            ? `http://localhost:3000/uploads/profile/${user.profileImage}`
-            : `http://localhost:3000/uploads/profile/default.png`,
+          profileImage: buildProfileImg(user.profileImage),
         },
       });
     }
@@ -464,9 +469,7 @@ exports.getProfile = async (req, res) => {
         message: "Receiver profile fetched successfully.",
         data: {
           ...user.toObject(),
-          profileImage: user.profileImage
-            ? `http://localhost:3000/uploads/profile/${user.profileImage}`
-            : `http://localhost:3000/uploads/profile/default.png`,
+          profileImage: buildProfileImg(user.profileImage),
         },
       });
     }
@@ -584,9 +587,11 @@ exports.updateProfile = async (req, res) => {
       data: {
         ...updatedProfile.toObject(),
         profileImage: updatedProfile.profileImage
-          ? `${req.protocol}://${req.get("host")}/uploads/profile/${
-              updatedProfile.profileImage
-            }`
+          ? updatedProfile.profileImage.startsWith("http")
+            ? updatedProfile.profileImage
+            : `${req.protocol}://${req.get("host")}/uploads/profile/${
+                updatedProfile.profileImage
+              }`
           : `${req.protocol}://${req.get("host")}/uploads/profile/default.png`,
       },
     });

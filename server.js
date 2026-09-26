@@ -83,62 +83,46 @@ const broadcastUserList = async (requesterId) => {
       (sockId) => users[sockId] === requesterId.toString()
     );
 
-    if (requester.userType === "donor") {
-      // 🧠 Get users donor chatted with, excluding soft-deleted ones
-      const chats = await chatModel.find({
-        $or: [{ senderId: requesterId }, { receiverId: requesterId }],
-        deletedByDonor: { $ne: true },
-      });
+    const isDonor = requester.userType === "donor";
+    const deleteFilter = isDonor
+      ? { deletedByDonor: { $ne: true } }
+      : { deletedByReceiver: { $ne: true } };
 
-      const userIds = [
-        ...new Set(
-          chats.map((chat) =>
-            chat.senderId.toString() === requesterId.toString()
-              ? chat.receiverId?.toString?.() // ✅ added ? for safety
-              : chat.senderId?.toString?.()
-          )
-        ),
-      ].filter(Boolean); // ✅ filter undefined/null
+    // Get users with whom the requester has chatted, excluding soft-deleted ones
+    const chats = await chatModel.find({
+      $or: [{ senderId: requesterId }, { receiverId: requesterId }],
+      ...deleteFilter,
+    });
 
-      const recentUsers = await userModel.find(
-        { _id: { $in: userIds } },
-        "_id name isOnline profileImage userType"
-      );
+    const userIds = [
+      ...new Set(
+        chats.map((chat) =>
+          chat.senderId.toString() === requesterId.toString()
+            ? chat.receiverId?.toString?.()
+            : chat.senderId?.toString?.()
+        )
+      ),
+    ].filter(Boolean);
 
-      const usersWithImageURL = recentUsers.map((user) => ({
-        userType: user.userType,
-        _id: user._id,
-        name: user.name,
-        isOnline: user.isOnline,
-        profileImage: user.profileImage
-          ? `http://localhost:3000/uploads/${user.profileImage}`
-          : `http://localhost:3000/uploads/default.png`,
-      }));
-
-      if (socketId) {
-        io.to(socketId).emit("user-list", usersWithImageURL);
-      }
-      return;
-    }
-
-    // If receiver, show all donors
-    const donors = await userModel.find(
-      { userType: "donor" },
+    const recentUsers = await userModel.find(
+      { _id: { $in: userIds } },
       "_id name isOnline profileImage userType"
     );
 
-    const donorsWithImageURL = donors.map((user) => ({
+    const usersWithImageURL = recentUsers.map((user) => ({
       userType: user.userType,
       _id: user._id,
       name: user.name,
       isOnline: user.isOnline,
       profileImage: user.profileImage
-        ? `http://localhost:3000/uploads/${user.profileImage}`
+        ? (user.profileImage.startsWith("http")
+            ? user.profileImage
+            : `http://localhost:3000/uploads/${user.profileImage}`)
         : `http://localhost:3000/uploads/default.png`,
     }));
 
     if (socketId) {
-      io.to(socketId).emit("user-list", donorsWithImageURL);
+      io.to(socketId).emit("user-list", usersWithImageURL);
     }
   } catch (err) {
     console.error("broadcastUserList error:", err);
