@@ -447,7 +447,7 @@ exports.getProfile = async (req, res) => {
 
     const baseUrl = `${req.protocol}://${req.get("host")}`;
     const buildProfileImg = (img) => {
-      if (!img) return `${baseUrl}/uploads/profile/default.png`;
+      if (!img || img === "default.png" || img.includes("default.png")) return null;
       if (typeof img === "string" && img.startsWith("http")) return img;
       return `${baseUrl}/uploads/profile/${img}`;
     };
@@ -592,7 +592,7 @@ exports.updateProfile = async (req, res) => {
             : `${req.protocol}://${req.get("host")}/uploads/profile/${
                 updatedProfile.profileImage
               }`
-          : `${req.protocol}://${req.get("host")}/uploads/profile/default.png`,
+          : null,
       },
     });
   } catch (error) {

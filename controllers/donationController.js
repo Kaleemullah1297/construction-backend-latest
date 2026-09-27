@@ -198,8 +198,16 @@ exports.scheduleDonation = async (req, res) => {
         .json({ success: false, message: "Donation not found" });
     }
 
-    let { scheduleDate, scheduleTime, scheduleComments, deliveryType } =
-      req.body;
+    let {
+      scheduleDate,
+      scheduleTime,
+      scheduleComments,
+      deliveryType,
+      scheduledQuantity,
+      quantity,
+      deliveryAddress,
+      address,
+    } = req.body || {};
 
     if (checkUser.userType === "receiver") {
       if (
